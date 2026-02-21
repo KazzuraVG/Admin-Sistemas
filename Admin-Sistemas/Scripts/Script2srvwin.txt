@@ -1,0 +1,250 @@
+$ErrorActionPreference = "Stop"
+
+function Pause { 
+    Write-Host ""
+    Read-Host ">> Presiona ENTER para volver al menu <<" | Out-Null 
+}
+
+function TrimOrEmpty([string]$s) {
+    if ($null -eq $s) { return "" }
+    return $s.Trim()
+}
+
+function Is-ValidIPv4([string]$ip) {
+    $ip = TrimOrEmpty $ip
+    if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $false }
+    $p = $ip.Split('.')
+    foreach ($x in $p) {
+        $n = [int]$x
+        if ($n -lt 0 -or $n -gt 255) { return $false }
+    }
+    if ($ip -eq "0.0.0.0") { return $false }
+    if ($ip -eq "255.255.255.255") { return $false }
+    return $true
+}
+
+function IPv4-ToUInt32([string]$ip) {
+    $p = $ip.Split('.')
+    return ([uint32]$p[0] -shl 24) -bor ([uint32]$p[1] -shl 16) -bor ([uint32]$p[2] -shl 8) -bor ([uint32]$p[3])
+}
+
+function Same-Subnet24([string]$a, [string]$b) {
+    $pa = $a.Split('.')
+    $pb = $b.Split('.')
+    return ($pa[0] -eq $pb[0] -and $pa[1] -eq $pb[1] -and $pa[2] -eq $pb[2])
+}
+
+function Inc-IP([string]$ip) {
+    $parts = $ip.Split('.')
+    $last = [int]$parts[3]
+    if ($last -ge 255) { throw "No se puede incrementar IP." }
+    $parts[3] = ($last + 1).ToString()
+    return ($parts -join ".")
+}
+
+$ALLOW_NET_BCAST = $true
+
+function Validate-Host24([string]$ip) {
+    if (-not $ALLOW_NET_BCAST) {
+        $last = [int]($ip.Split('.')[3])
+        if ($last -eq 0) { return $false }
+        if ($last -eq 255) { return $false }
+    }
+    return $true
+}
+
+function Read-IPv4([string]$label, [bool]$allowEmpty=$false) {
+    while ($true) {
+        $v = TrimOrEmpty (Read-Host $label)
+        if ($allowEmpty -and $v -eq "") { return "" }
+        if (Is-ValidIPv4 $v) { return $v }
+        Write-Host ">> IP invalida. Intenta nuevamente."
+    }
+}
+
+function Read-Int([string]$label, [int]$min, [int]$max, [int]$defaultVal) {
+    while ($true) {
+        $v = TrimOrEmpty (Read-Host $label)
+        if ($v -eq "") { return $defaultVal }
+        [int]$n = 0
+        if ([int]::TryParse($v, [ref]$n) -and $n -ge $min -and $n -le $max) { return $n }
+        Write-Host ">> Valor invalido. Rango permitido: $min - $max"
+    }
+}
+
+function Is-DHCPInstalled {
+    return (Get-WindowsFeature DHCP).Installed
+}
+
+function Install-DHCP {
+    if (Is-DHCPInstalled) {
+        $r = TrimOrEmpty (Read-Host "DHCP ya esta instalado. Deseas reinstalarlo? (s/n)")
+        if ($r -ne "s") { return }
+        Uninstall-WindowsFeature DHCP -Remove -Confirm:$false | Out-Null
+    }
+    Install-WindowsFeature DHCP -IncludeManagementTools | Out-Null
+    Write-Host ">> DHCP instalado correctamente."
+}
+
+function Uninstall-DHCP {
+    if (-not (Is-DHCPInstalled)) {
+        Write-Host ">> DHCP ya estaba desinstalado."
+        return
+    }
+    Uninstall-WindowsFeature DHCP -Remove -Confirm:$false | Out-Null
+    Write-Host ">> DHCP desinstalado correctamente."
+}
+
+function Restart-DHCP {
+    Restart-Service DHCPServer -ErrorAction SilentlyContinue
+    Write-Host ">> Servicio DHCP reiniciado."
+}
+
+function Configure-Scope {
+
+    if (-not (Is-DHCPInstalled)) {
+        Write-Host ">> DHCP no esta instalado en el dispositivo."
+        return
+    }
+
+    Import-Module DhcpServer
+
+    Write-Host ""
+    Write-Host "===== CONFIGURACION DE SCOPE ====="
+
+    $scopeName = TrimOrEmpty (Read-Host "Nombre del Scope")
+    if ($scopeName -eq "") { $scopeName = "scope1" }
+
+    $ifaces = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+    if (-not $ifaces -or $ifaces.Count -lt 1) { throw "No hay interfaces activas." }
+
+    Write-Host ""
+    Write-Host "Interfaces activas:"
+    for ($i=0; $i -lt $ifaces.Count; $i++) {
+        Write-Host (" [{0}] {1}" -f ($i+1), $ifaces[$i].Name)
+    }
+
+    $choice = Read-Int "Selecciona una interfaz" 1 $ifaces.Count 1
+    $iface = $ifaces[$choice-1].Name
+
+    $startIp = Read-IPv4 "IP fija del servidor (inicio rango)" $false
+    $endIp   = Read-IPv4 "IP final del rango" $false
+
+    if (-not (Validate-Host24 $startIp)) { Write-Host ">> IP inicial invalida."; return }
+    if (-not (Validate-Host24 $endIp))   { Write-Host ">> IP final invalida."; return }
+
+    if (-not (Same-Subnet24 $startIp $endIp)) {
+        Write-Host ">> Las IP no pertenecen al mismo segmento."
+        return
+    }
+
+    $uStart = IPv4-ToUInt32 $startIp
+    $uEnd   = IPv4-ToUInt32 $endIp
+    if ($uStart -ge $uEnd) {
+        Write-Host ">> Rango invalido. La IP inicial debe ser menor."
+        return
+    }
+
+    $leaseSeconds = Read-Int "Lease en segundos (default 86400)" 60 604800 86400
+    $lease = [TimeSpan]::FromSeconds($leaseSeconds)
+
+    $gateway = Read-IPv4 "Gateway (ENTER para omitir)" $true
+    if ($gateway -ne "" -and (-not (Same-Subnet24 $startIp $gateway))) {
+        Write-Host ">> Gateway fuera del segmento."
+        return
+    }
+
+    $dns1 = Read-IPv4 "DNS1 (ENTER para omitir)" $true
+    $dns2 = Read-IPv4 "DNS2 (ENTER para omitir)" $true
+
+    Get-NetIPAddress -InterfaceAlias $iface -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+
+    if ($gateway -ne "") {
+        New-NetIPAddress -InterfaceAlias $iface -IPAddress $startIp -PrefixLength 24 -DefaultGateway $gateway | Out-Null
+    } else {
+        New-NetIPAddress -InterfaceAlias $iface -IPAddress $startIp -PrefixLength 24 | Out-Null
+    }
+
+    $poolStart = Inc-IP $startIp
+
+    $existing = Get-DhcpServerv4Scope -ErrorAction SilentlyContinue
+    if ($existing) {
+        foreach ($s in $existing) {
+            if (Same-Subnet24 $startIp $s.ScopeId.IPAddressToString) {
+                Remove-DhcpServerv4Scope -ScopeId $s.ScopeId -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Add-DhcpServerv4Scope -Name $scopeName -StartRange $poolStart -EndRange $endIp -SubnetMask 255.255.255.0 -LeaseDuration $lease | Out-Null
+
+    $scopeId = ($startIp.Split('.')[0..2] -join ".") + ".0"
+
+    if ($gateway -ne "") {
+        Set-DhcpServerv4OptionValue -ScopeId $scopeId -Router $gateway | Out-Null
+    }
+
+    if ($dns1 -ne "") {
+        if ($dns2 -ne "") {
+            Set-DhcpServerv4OptionValue -ScopeId $scopeId -DnsServer $dns1, $dns2 -Force | Out-Null
+        } else {
+            Set-DhcpServerv4OptionValue -ScopeId $scopeId -DnsServer $dns1 -Force | Out-Null
+        }
+    }
+
+    Restart-Service DHCPServer -ErrorAction SilentlyContinue
+
+    Write-Host ""
+    Write-Host "===== SCOPE CONFIGURADO ====="
+    Write-Host ("IP Servidor : {0}" -f $startIp)
+    Write-Host ("Rango DHCP  : {0} - {1}" -f $poolStart, $endIp)
+    Write-Host ("Scope ID    : {0}" -f $scopeId)
+    Write-Host ("Lease (seg) : {0}" -f $leaseSeconds)
+}
+
+function Monitor {
+    if (-not (Is-DHCPInstalled)) { Write-Host "DHCP no instalado."; return }
+    Import-Module DhcpServer
+
+    Write-Host ""
+    Write-Host "===== SCOPES ====="
+    Get-DhcpServerv4Scope | Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host "===== LEASES ACTIVOS ====="
+    Get-DhcpServerv4Lease | Format-Table -AutoSize
+}
+
+while ($true) {
+    Clear-Host
+    Write-Host "========================================"
+    Write-Host "        ADMINISTRADOR DHCP SERVER       "
+    Write-Host "========================================"
+    Write-Host " 1) Verificar instalacion"
+    Write-Host " 2) Instalar DHCP"
+    Write-Host " 3) Configurar Scope"
+    Write-Host " 4) Monitorear"
+    Write-Host " 5) Reiniciar Servicio"
+    Write-Host " 6) Desinstalar DHCP"
+    Write-Host " 7) Salir"
+    Write-Host "========================================"
+
+    $op = TrimOrEmpty (Read-Host "Selecciona una opcion")
+
+    try {
+        switch ($op) {
+            "1" { Get-WindowsFeature DHCP | Format-Table -AutoSize; Pause }
+            "2" { Install-DHCP; Pause }
+            "3" { Configure-Scope; Pause }
+            "4" { Monitor; Pause }
+            "5" { Restart-DHCP; Pause }
+            "6" { Uninstall-DHCP; Pause }
+            "7" { break }
+            default { Write-Host ">> Opcion invalida."; Pause }
+        }
+    } catch {
+        Write-Host ("ERROR: {0}" -f $_.Exception.Message)
+        Pause
+    }
+}
