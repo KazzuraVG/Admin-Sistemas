@@ -1,35 +1,45 @@
-
+#!/bin/sh
 set -eu
 
+# ┌─────────────────────────────────────────────────┐
+# │         DNS MANAGER - Alpine Linux              │
+# └─────────────────────────────────────────────────┘
 
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-GREEN='\033[0;32m'
-RED='\033[0;31m' 
+C_CYAN='\033[0;36m'
+C_WHITE='\033[1;37m'
+C_GREEN='\033[0;32m'
+C_RED='\033[0;31m'
+C_ORANGE='\033[0;33m'
+C_GRAY='\033[0;90m'
 NC='\033[0m'
-
 
 LAB_IFACE="eth1"
 ZONEDIR="/var/bind"
 NAMED_CONF="/etc/bind/named.conf"
 NAMED_LOCAL="/etc/bind/named.conf.local"
 
+DIVIDER="${C_GRAY}──────────────────────────────────────────────────${NC}"
 
-log(){ echo -e "${GREEN}[INFO]${NC} $*"; }
-warn(){ echo -e "${YELLOW}[WARN]${NC} $*"; }
-die(){ echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+log(){ echo -e "  ${C_GREEN}✔${NC}  $*"; }
+warn(){ echo -e "  ${C_ORANGE}!${NC}  $*"; }
+die(){ echo -e "  ${C_RED}✘${NC}  $*"; exit 1; }
 
 require_root(){ [ "$(id -u)" -eq 0 ] || die "Ejecuta como root."; }
 
+section() {
+  echo -e "\n${DIVIDER}"
+  echo -e "  ${C_CYAN}${1}${NC}"
+  echo -e "${DIVIDER}"
+}
 
 validacionIp() {
   while true; do
-    printf "%s" "$1" >&2
+    printf "  %s" "$1" >&2
     read -r ip || true
     if echo "$ip" | grep -Eq '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'; then
       echo "$ip"; return 0
     fi
-    echo -e "${RED}Formato IPv4 inválido. Reintente.${NC}" >&2
+    echo -e "  ${C_RED}IP invalida. Reintente.${NC}" >&2
   done
 }
 
@@ -38,22 +48,21 @@ server_ip_eth1() {
 }
 
 verificar_ip_lab() {
-  echo -e "${BLUE}================== VALIDACIÓN DE LAB ==================${NC}"
+  section "VALIDACION DE LAB"
   ip link show "$LAB_IFACE" >/dev/null 2>&1 || die "No existe $LAB_IFACE."
   ip link set "$LAB_IFACE" up 2>/dev/null || true
 
   SIP="$(server_ip_eth1)"
   if [ -z "${SIP:-}" ]; then
-    warn "eth1 NO tiene IP. Configura primero la red estática."
+    warn "eth1 NO tiene IP. Configura primero la red estatica."
     return 1
   fi
-  log "Servidor (eth1) tiene IP: $SIP"
+  log "Servidor (eth1): $SIP"
   return 0
 }
 
-
 verificar_instalacion() {
-  echo -e "${BLUE}>>> Verificando instalación DNS...${NC}"
+  section "VERIFICAR INSTALACION"
   if command -v named >/dev/null 2>&1; then
     log "BIND instalado."
   else
@@ -62,19 +71,19 @@ verificar_instalacion() {
 }
 
 instalar_dns() {
-  echo -e "${BLUE}================== INSTALAR DNS ==================${NC}"
+  section "INSTALAR DNS"
   if command -v named >/dev/null 2>&1; then
-    log "BIND ya está instalado."
+    log "BIND ya esta instalado."
     return 0
   fi
-  apk add --no-cache bind bind-tools bind-openrc || die "Falló la descarga."
-  log "Instalación exitosa."
+  apk add --no-cache bind bind-tools bind-openrc || die "Fallo la descarga."
+  log "Instalacion exitosa."
 }
 
 desinstalar_dns() {
-  echo -e "${BLUE}================== DESINSTALAR DNS ==================${NC}"
+  section "DESINSTALAR DNS"
   rc-service named stop 2>/dev/null || true
-  apk del bind bind-tools bind-openrc || die "Falló desinstalación."
+  apk del bind bind-tools bind-openrc || die "Fallo desinstalacion."
   log "BIND eliminado del sistema."
 }
 
@@ -97,18 +106,25 @@ EOF
 zona_existe() { grep -Eq "zone[[:space:]]+\"$1\"" "$NAMED_LOCAL" 2>/dev/null; }
 
 listar_dominios() {
-  echo -e "${BLUE}================== DOMINIOS ACTUALES ==================${NC}"
-  [ -f "$NAMED_LOCAL" ] || { echo "(vacio)"; return 0; }
-  awk -F\" '/zone "/{print " -> " $2}' "$NAMED_LOCAL" | sort -u
+  section "DOMINIOS REGISTRADOS"
+  [ -f "$NAMED_LOCAL" ] || { echo "  (sin dominios)"; return 0; }
+  COUNT=0
+  while IFS= read -r line; do
+    echo -e "  ${C_CYAN}→${NC} $line"
+    COUNT=$((COUNT + 1))
+  done <<EOF
+$(awk -F\" '/zone "/{print $2}' "$NAMED_LOCAL" | sort -u)
+EOF
+  [ "$COUNT" -eq 0 ] && echo "  (sin dominios)"
 }
 
 alta_dominio() {
-  echo -e "${BLUE}================== ALTA DE DOMINIO ==================${NC}"
+  section "ALTA DE DOMINIO"
   verificar_ip_lab || return 1
   instalar_dns
   asegurar_base_bind
 
-  printf "Nombre del dominio: "
+  printf "  Nombre del dominio: "
   read -r DOM
   [ -n "${DOM:-}" ] || return 1
 
@@ -116,7 +132,6 @@ alta_dominio() {
   ZFILE="$ZONEDIR/db.$DOM"
 
   if ! zona_existe "$DOM"; then
-   
     echo "" >> "$NAMED_LOCAL"
     cat >> "$NAMED_LOCAL" <<EOF
 zone "$DOM" {
@@ -127,7 +142,6 @@ EOF
     log "Zona $DOM agregada a named.conf.local"
   fi
 
- 
   if [ ! -f "$ZFILE" ]; then
     SIP="$(server_ip_eth1)"
     cat > "$ZFILE" <<EOF
@@ -141,18 +155,18 @@ EOF
   fi
 
   if named-checkconf "$NAMED_CONF"; then
-      rc-service named restart
-      echo -e "${GREEN}ÉXITO: $DOM configurado y servicio reiniciado.${NC}"
+    rc-service named restart
+    log "Dominio $DOM configurado y servicio reiniciado."
   else
-      echo -e "${RED}ERROR: Sintaxis inválida en $NAMED_LOCAL. Revisa el archivo.${NC}"
-      return 1
+    die "Sintaxis invalida en $NAMED_LOCAL. Revisa el archivo."
+    return 1
   fi
 }
 
 baja_dominio() {
-  echo -e "${BLUE}================== BAJA DE DOMINIO ==================${NC}"
+  section "BAJA DE DOMINIO"
   listar_dominios
-  printf "Dominio a borrar: "
+  printf "  Dominio a eliminar: "
   read -r DOM
   [ -n "${DOM:-}" ] || return 1
 
@@ -160,37 +174,38 @@ baja_dominio() {
     sed -i "/zone \"$DOM\"/,/};/d" "$NAMED_LOCAL"
     rm -f "$ZONEDIR/db.$DOM"
     rc-service named restart
-    echo -e "${YELLOW}Dominio $DOM eliminado.${NC}"
+    warn "Dominio $DOM eliminado."
+  else
+    warn "El dominio $DOM no existe."
   fi
 }
 
 estado_dns() {
-  echo -e "${BLUE}================== ESTADO DNS ==================${NC}"
-  rc-service named status 2>/dev/null || echo "Servicio detenido."
+  section "ESTADO DEL SERVICIO"
+  rc-service named status 2>/dev/null || echo "  Servicio detenido."
   listar_dominios
 }
 
-
 menu() {
-  echo -e "\n${BLUE}====================================================${NC}"
-  echo -e "${YELLOW}               SERVIDOR DNS - ALPINE                ${NC}"
-  echo -e "${BLUE}====================================================${NC}"
-  echo -e "${GREEN}[1]${NC} Verificar IP (eth1)"
-  echo -e "${GREEN}[2]${NC} Verificar instalación"
-  echo -e "${GREEN}[3]${NC} Instalar DNS"
-  echo -e "${GREEN}[4]${NC} Desinstalar DNS"
-  echo -e "${GREEN}[5]${NC} Listar dominios"
-  echo -e "${GREEN}[6]${NC} Alta de dominio"
-  echo -e "${GREEN}[7]${NC} Baja de dominio"
-  echo -e "${GREEN}[8]${NC} Estado del servicio"
-  echo -e "${GREEN}[9]${NC} Salir"
+  echo -e "\n${DIVIDER}"
+  echo -e "  ${C_WHITE}DNS MANAGER${NC}  ${C_GRAY}Alpine Linux${NC}"
+  echo -e "${DIVIDER}"
+  echo -e "  ${C_CYAN}1${NC}  ${C_GRAY}│${NC}  Verificar IP (eth1)"
+  echo -e "  ${C_CYAN}2${NC}  ${C_GRAY}│${NC}  Verificar instalacion"
+  echo -e "  ${C_CYAN}3${NC}  ${C_GRAY}│${NC}  Instalar DNS"
+  echo -e "  ${C_CYAN}4${NC}  ${C_GRAY}│${NC}  Desinstalar DNS"
+  echo -e "  ${C_CYAN}5${NC}  ${C_GRAY}│${NC}  Listar dominios"
+  echo -e "  ${C_CYAN}6${NC}  ${C_GRAY}│${NC}  Alta de dominio"
+  echo -e "  ${C_CYAN}7${NC}  ${C_GRAY}│${NC}  Baja de dominio"
+  echo -e "  ${C_CYAN}8${NC}  ${C_GRAY}│${NC}  Estado del servicio"
+  echo -e "  ${C_CYAN}9${NC}  ${C_GRAY}│${NC}  Salir"
+  echo -e "${DIVIDER}"
 }
-
 
 require_root
 while true; do
   menu
-  printf "\n${YELLOW}Seleccione una opción: ${NC}"
+  printf "  ${C_WHITE}Opcion:${NC} "
   read -r op
 
   case "$op" in
@@ -203,10 +218,10 @@ while true; do
     7) baja_dominio ;;
     8) estado_dns ;;
     9) exit 0 ;;
-    *) echo "Opción no válida." ;;
+    *) warn "Opcion no valida." ;;
   esac
 
-  printf "\n${GREEN}¿Volver al menú? (si/no): ${NC}"
+  printf "\n  ${C_GREEN}Volver al menu? (si/no):${NC} "
   read -r ch
   [ "$ch" = "si" ] || break
 done
