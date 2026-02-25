@@ -1,227 +1,242 @@
 #!/bin/sh
 set -eu
 
-# ┌─────────────────────────────────────────────────┐
-# │         DNS MANAGER - Alpine Linux              │
-# └─────────────────────────────────────────────────┘
+# ╔════════════════════════════════════════════════════╗
+# ║          BIND9 CONTROL PANEL :: Alpine             ║
+# ╚════════════════════════════════════════════════════╝
 
-C_CYAN='\033[0;36m'
-C_WHITE='\033[1;37m'
-C_GREEN='\033[0;32m'
-C_RED='\033[0;31m'
-C_ORANGE='\033[0;33m'
-C_GRAY='\033[0;90m'
-NC='\033[0m'
+#── Colores ────────────────────────────────────────────
+K_OK='\033[0;32m'
+K_NG='\033[0;31m'
+K_WR='\033[0;33m'
+K_HI='\033[1;36m'
+K_DM='\033[0;90m'
+K_BD='\033[1;37m'
+K_RS='\033[0m'
 
-LAB_IFACE="eth1"
-ZONEDIR="/var/bind"
-NAMED_CONF="/etc/bind/named.conf"
-NAMED_LOCAL="/etc/bind/named.conf.local"
+#── Rutas ──────────────────────────────────────────────
+NIC="eth1"
+ZONE_DIR="/var/bind"
+CONF_MAIN="/etc/bind/named.conf"
+CONF_ZONES="/etc/bind/named.conf.local"
 
-DIVIDER="${C_GRAY}──────────────────────────────────────────────────${NC}"
+#── Utilidades ─────────────────────────────────────────
+ok()   { printf "  ${K_OK}[OK]${K_RS}  %s\n" "$*"; }
+fail() { printf "  ${K_NG}[!!]${K_RS}  %s\n" "$*"; exit 1; }
+note() { printf "  ${K_WR}[--]${K_RS}  %s\n" "$*"; }
 
-log(){ echo -e "  ${C_GREEN}✔${NC}  $*"; }
-warn(){ echo -e "  ${C_ORANGE}!${NC}  $*"; }
-die(){ echo -e "  ${C_RED}✘${NC}  $*"; exit 1; }
-
-require_root(){ [ "$(id -u)" -eq 0 ] || die "Ejecuta como root."; }
-
-section() {
-  echo -e "\n${DIVIDER}"
-  echo -e "  ${C_CYAN}${1}${NC}"
-  echo -e "${DIVIDER}"
+box() {
+  local title="$1"
+  printf "\n${K_DM}  ┌──────────────────────────────────────────────┐${K_RS}\n"
+  printf   "${K_HI}  │  %-44s│${K_RS}\n" "$title"
+  printf   "${K_DM}  └──────────────────────────────────────────────┘${K_RS}\n\n"
 }
 
-validacionIp() {
+ask() {
+  printf "  ${K_BD}▸${K_RS} %s " "$1"
+  read -r REPLY
+  echo "$REPLY"
+}
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || fail "Se requiere root."
+}
+
+#── Red ────────────────────────────────────────────────
+get_server_ip() {
+  ip -4 addr show "$NIC" 2>/dev/null \
+    | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1 || true
+}
+
+validar_ipv4() {
+  local prompt="$1" addr
   while true; do
-    printf "  %s" "$1" >&2
-    read -r ip || true
-    if echo "$ip" | grep -Eq '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'; then
-      echo "$ip"; return 0
+    printf "  ${K_BD}▸${K_RS} %s " "$prompt" >&2
+    read -r addr || true
+    if echo "$addr" | grep -Eq \
+      '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+    then
+      echo "$addr"; return 0
     fi
-    echo -e "  ${C_RED}IP invalida. Reintente.${NC}" >&2
+    printf "  ${K_NG}IP no valida. Intente de nuevo.${K_RS}\n" >&2
   done
 }
 
-server_ip_eth1() {
-  ip -4 addr show "$LAB_IFACE" 2>/dev/null | awk '/inet /{print $2}' | head -n1 | cut -d/ -f1 || true
-}
-
-verificar_ip_lab() {
-  section "VALIDACION DE LAB"
-  ip link show "$LAB_IFACE" >/dev/null 2>&1 || die "No existe $LAB_IFACE."
-  ip link set "$LAB_IFACE" up 2>/dev/null || true
-
-  SIP="$(server_ip_eth1)"
-  if [ -z "${SIP:-}" ]; then
-    warn "eth1 NO tiene IP. Configura primero la red estatica."
+chequear_red() {
+  box "VERIFICACION DE RED"
+  ip link show "$NIC" >/dev/null 2>&1 || fail "Interfaz $NIC no encontrada."
+  ip link set "$NIC" up 2>/dev/null || true
+  local addr
+  addr="$(get_server_ip)"
+  if [ -z "${addr:-}" ]; then
+    note "$NIC no tiene IP asignada."
     return 1
   fi
-  log "Servidor (eth1): $SIP"
-  return 0
+  ok "$NIC activa con IP: $addr"
 }
 
-verificar_instalacion() {
-  section "VERIFICAR INSTALACION"
+#── BIND ───────────────────────────────────────────────
+chequear_bind() {
+  box "ESTADO DE INSTALACION"
   if command -v named >/dev/null 2>&1; then
-    log "BIND instalado."
+    ok "BIND9 esta instalado."
   else
-    warn "BIND NO instalado."
+    note "BIND9 no esta instalado."
   fi
 }
 
-instalar_dns() {
-  section "INSTALAR DNS"
+instalar_bind() {
+  box "INSTALAR BIND9"
   if command -v named >/dev/null 2>&1; then
-    log "BIND ya esta instalado."
+    ok "BIND9 ya estaba instalado."
     return 0
   fi
-  apk add --no-cache bind bind-tools bind-openrc || die "Fallo la descarga."
-  log "Instalacion exitosa."
+  apk add --no-cache bind bind-tools bind-openrc || fail "Error al instalar."
+  ok "BIND9 instalado correctamente."
 }
 
-desinstalar_dns() {
-  section "DESINSTALAR DNS"
+desinstalar_bind() {
+  box "DESINSTALAR BIND9"
   rc-service named stop 2>/dev/null || true
-  apk del bind bind-tools bind-openrc || die "Fallo desinstalacion."
-  log "BIND eliminado del sistema."
+  apk del bind bind-tools bind-openrc || fail "Error al desinstalar."
+  ok "BIND9 eliminado del sistema."
 }
 
-asegurar_base_bind() {
-  mkdir -p /etc/bind "$ZONEDIR"
-  [ -f "$NAMED_LOCAL" ] || echo "// Zonas locales" > "$NAMED_LOCAL"
-  if [ ! -f "$NAMED_CONF" ]; then
-    cat > "$NAMED_CONF" <<EOF
+preparar_conf() {
+  mkdir -p /etc/bind "$ZONE_DIR"
+  [ -f "$CONF_ZONES" ] || echo "// zonas locales" > "$CONF_ZONES"
+  if [ ! -f "$CONF_MAIN" ]; then
+    cat > "$CONF_MAIN" <<EOF
 options {
-  directory "$ZONEDIR";
+  directory "$ZONE_DIR";
   listen-on { any; };
   allow-query { any; };
   recursion no;
 };
-include "$NAMED_LOCAL";
+include "$CONF_ZONES";
 EOF
   fi
 }
 
-zona_existe() { grep -Eq "zone[[:space:]]+\"$1\"" "$NAMED_LOCAL" 2>/dev/null; }
-
-listar_dominios() {
-  section "DOMINIOS REGISTRADOS"
-  [ -f "$NAMED_LOCAL" ] || { echo "  (sin dominios)"; return 0; }
-  COUNT=0
-  while IFS= read -r line; do
-    echo -e "  ${C_CYAN}→${NC} $line"
-    COUNT=$((COUNT + 1))
-  done <<EOF
-$(awk -F\" '/zone "/{print $2}' "$NAMED_LOCAL" | sort -u)
-EOF
-  [ "$COUNT" -eq 0 ] && echo "  (sin dominios)"
+zona_registrada() {
+  grep -Eq "zone[[:space:]]+\"$1\"" "$CONF_ZONES" 2>/dev/null
 }
 
-alta_dominio() {
-  section "ALTA DE DOMINIO"
-  verificar_ip_lab || return 1
-  instalar_dns
-  asegurar_base_bind
+#── Dominios ───────────────────────────────────────────
+listar_zonas() {
+  box "ZONAS CONFIGURADAS"
+  [ -f "$CONF_ZONES" ] || { note "Sin zonas registradas."; return 0; }
+  local found=0
+  while IFS= read -r entry; do
+    printf "  ${K_HI}◆${K_RS}  %s\n" "$entry"
+    found=$((found + 1))
+  done <<ZEOF
+$(awk -F'"' '/zone "/{print $2}' "$CONF_ZONES" | sort -u)
+ZEOF
+  [ "$found" -gt 0 ] || note "Sin zonas registradas."
+}
 
-  printf "  Nombre del dominio: "
-  read -r DOM
+agregar_zona() {
+  box "REGISTRAR DOMINIO"
+  chequear_red || return 1
+  instalar_bind
+  preparar_conf
+
+  DOM="$(ask "Nombre del dominio:")"
   [ -n "${DOM:-}" ] || return 1
 
-  IPDEST="$(validacionIp "IP de destino para $DOM: ")"
-  ZFILE="$ZONEDIR/db.$DOM"
+  TARGET_IP="$(validar_ipv4 "IP de destino para $DOM:")"
+  ZONE_FILE="$ZONE_DIR/db.$DOM"
 
-  if ! zona_existe "$DOM"; then
-    echo "" >> "$NAMED_LOCAL"
-    cat >> "$NAMED_LOCAL" <<EOF
-zone "$DOM" {
-    type master;
-    file "$ZFILE";
-};
-EOF
-    log "Zona $DOM agregada a named.conf.local"
+  if ! zona_registrada "$DOM"; then
+    {
+      echo ""
+      echo "zone \"$DOM\" {"
+      echo "    type master;"
+      echo "    file \"$ZONE_FILE\";"
+      echo "};"
+    } >> "$CONF_ZONES"
+    ok "Zona $DOM agregada."
   fi
 
-  if [ ! -f "$ZFILE" ]; then
-    SIP="$(server_ip_eth1)"
-    cat > "$ZFILE" <<EOF
+  if [ ! -f "$ZONE_FILE" ]; then
+    SRV_IP="$(get_server_ip)"
+    cat > "$ZONE_FILE" <<EOF
 \$TTL 3600
 @ IN SOA ns1.$DOM. admin.$DOM. ( $(date +%Y%m%d)01 3600 900 1209600 3600 )
-@   IN NS ns1.$DOM.
-ns1 IN A  $SIP
-@   IN A  $IPDEST
-www IN A  $IPDEST
+@   IN NS  ns1.$DOM.
+ns1 IN A   $SRV_IP
+@   IN A   $TARGET_IP
+www IN A   $TARGET_IP
 EOF
   fi
 
-  if named-checkconf "$NAMED_CONF"; then
+  if named-checkconf "$CONF_MAIN"; then
     rc-service named restart
-    log "Dominio $DOM configurado y servicio reiniciado."
+    ok "Dominio $DOM activo. Servicio reiniciado."
   else
-    die "Sintaxis invalida en $NAMED_LOCAL. Revisa el archivo."
+    fail "Configuracion invalida. Revisa $CONF_ZONES"
     return 1
   fi
 }
 
-baja_dominio() {
-  section "BAJA DE DOMINIO"
-  listar_dominios
-  printf "  Dominio a eliminar: "
-  read -r DOM
+eliminar_zona() {
+  box "ELIMINAR DOMINIO"
+  listar_zonas
+  DOM="$(ask "Dominio a eliminar:")"
   [ -n "${DOM:-}" ] || return 1
 
-  if zona_existe "$DOM"; then
-    sed -i "/zone \"$DOM\"/,/};/d" "$NAMED_LOCAL"
-    rm -f "$ZONEDIR/db.$DOM"
+  if zona_registrada "$DOM"; then
+    sed -i "/zone \"$DOM\"/,/};/d" "$CONF_ZONES"
+    rm -f "$ZONE_DIR/db.$DOM"
     rc-service named restart
-    warn "Dominio $DOM eliminado."
+    note "Dominio $DOM eliminado."
   else
-    warn "El dominio $DOM no existe."
+    note "El dominio $DOM no existe."
   fi
 }
 
-estado_dns() {
-  section "ESTADO DEL SERVICIO"
-  rc-service named status 2>/dev/null || echo "  Servicio detenido."
-  listar_dominios
+estado_servicio() {
+  box "ESTADO DEL SERVICIO"
+  rc-service named status 2>/dev/null || note "Servicio detenido."
+  listar_zonas
 }
 
-menu() {
-  echo -e "\n${DIVIDER}"
-  echo -e "  ${C_WHITE}DNS MANAGER${NC}  ${C_GRAY}Alpine Linux${NC}"
-  echo -e "${DIVIDER}"
-  echo -e "  ${C_CYAN}1${NC}  ${C_GRAY}│${NC}  Verificar IP (eth1)"
-  echo -e "  ${C_CYAN}2${NC}  ${C_GRAY}│${NC}  Verificar instalacion"
-  echo -e "  ${C_CYAN}3${NC}  ${C_GRAY}│${NC}  Instalar DNS"
-  echo -e "  ${C_CYAN}4${NC}  ${C_GRAY}│${NC}  Desinstalar DNS"
-  echo -e "  ${C_CYAN}5${NC}  ${C_GRAY}│${NC}  Listar dominios"
-  echo -e "  ${C_CYAN}6${NC}  ${C_GRAY}│${NC}  Alta de dominio"
-  echo -e "  ${C_CYAN}7${NC}  ${C_GRAY}│${NC}  Baja de dominio"
-  echo -e "  ${C_CYAN}8${NC}  ${C_GRAY}│${NC}  Estado del servicio"
-  echo -e "  ${C_CYAN}9${NC}  ${C_GRAY}│${NC}  Salir"
-  echo -e "${DIVIDER}"
+#── Menu ───────────────────────────────────────────────
+mostrar_menu() {
+  printf "\n${K_DM}  ╔══════════════════════════════════════════════╗${K_RS}\n"
+  printf   "${K_BD}  ║        BIND9 CONTROL PANEL :: Alpine        ║${K_RS}\n"
+  printf   "${K_DM}  ╠══════════════════════════════════════════════╣${K_RS}\n"
+  printf   "  ║  ${K_HI}1${K_RS}  Verificar red           ${K_HI}6${K_RS}  Alta de zona  ${K_DM}║${K_RS}\n"
+  printf   "  ║  ${K_HI}2${K_RS}  Estado BIND             ${K_HI}7${K_RS}  Baja de zona  ${K_DM}║${K_RS}\n"
+  printf   "  ║  ${K_HI}3${K_RS}  Instalar BIND           ${K_HI}8${K_RS}  Estado DNS    ${K_DM}║${K_RS}\n"
+  printf   "  ║  ${K_HI}4${K_RS}  Desinstalar BIND        ${K_HI}9${K_RS}  Salir         ${K_DM}║${K_RS}\n"
+  printf   "  ║  ${K_HI}5${K_RS}  Listar zonas                          ${K_DM}║${K_RS}\n"
+  printf   "${K_DM}  ╚══════════════════════════════════════════════╝${K_RS}\n"
 }
 
-require_root
+#── Main ───────────────────────────────────────────────
+need_root
+
 while true; do
-  menu
-  printf "  ${C_WHITE}Opcion:${NC} "
-  read -r op
+  mostrar_menu
+  printf "\n  ${K_BD}▸${K_RS} Seleccione: "
+  read -r OPCION
 
-  case "$op" in
-    1) verificar_ip_lab ;;
-    2) verificar_instalacion ;;
-    3) instalar_dns ;;
-    4) desinstalar_dns ;;
-    5) listar_dominios ;;
-    6) alta_dominio ;;
-    7) baja_dominio ;;
-    8) estado_dns ;;
-    9) exit 0 ;;
-    *) warn "Opcion no valida." ;;
+  case "$OPCION" in
+    1) chequear_red ;;
+    2) chequear_bind ;;
+    3) instalar_bind ;;
+    4) desinstalar_bind ;;
+    5) listar_zonas ;;
+    6) agregar_zona ;;
+    7) eliminar_zona ;;
+    8) estado_servicio ;;
+    9) printf "\n  ${K_DM}Saliendo...${K_RS}\n\n"; exit 0 ;;
+    *) note "Opcion no reconocida." ;;
   esac
 
-  printf "\n  ${C_GREEN}Volver al menu? (si/no):${NC} "
-  read -r ch
-  [ "$ch" = "si" ] || break
+  printf "\n  ${K_WR}▸${K_RS} Volver al menu? (si/no): "
+  read -r CONTINUAR
+  [ "$CONTINUAR" = "si" ] || break
 done
