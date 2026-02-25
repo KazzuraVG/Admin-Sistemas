@@ -1,10 +1,3 @@
-
-
-
-You said:
-
-
-
 function validacionIp {
     param([string]$mensaje, [bool]$opcional = $false)
     do {
