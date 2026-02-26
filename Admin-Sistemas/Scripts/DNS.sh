@@ -166,9 +166,7 @@ estado_servicio() {
 menu() {
   clear
   echo -e "${C2}"
-  echo "====================================="
   echo "         PANEL DNS ALPINE"
-  echo "====================================="
   echo " 1) Verificar red"
   echo " 2) Verificar instalacion"
   echo " 3) Instalar DNS"
@@ -178,7 +176,6 @@ menu() {
   echo " 7) Eliminar dominio"
   echo " 8) Estado del servicio"
   echo " 9) Salir"
-  echo "====================================="
   echo -e "${END}"
 }
 
