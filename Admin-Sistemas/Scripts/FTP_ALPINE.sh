@@ -490,7 +490,7 @@ instalar_ftp() {
     configurar_firewall
     rc-update add vsftpd default 2>/dev/null
     rc-service vsftpd restart
-    IP=$(ip -4 addr show eth2 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    IP=$(ip -4 addr show eth2 | awk '/inet / {print $2}' | cut -d/ -f1)
     printf "\n"
     printf "${C_GREEN}[OK]    ══════════════════════════════════════════════${C_RESET}\n"
     printf "${C_GREEN}[OK]      Servidor FTP listo${C_RESET}\n"
