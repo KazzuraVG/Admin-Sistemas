@@ -149,7 +149,17 @@ crear_estructura_base() {
 configurar_vsftpd() {
     print_info "Generando configuracion de vsftpd..."
     mkdir -p /etc/vsftpd
-    cat > "$VSFTPD_CONF" << 'EOF'
+
+    # Obtener IP del bridge (eth2)
+    BRIDGE_IP=$(ip -4 addr show eth2 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    if [ -z "$BRIDGE_IP" ]; then
+        print_warn "No se pudo detectar IP de eth2. Verifica la interfaz."
+        BRIDGE_IP=""
+    else
+        print_ok "IP detectada en eth2: $BRIDGE_IP"
+    fi
+
+    cat > "$VSFTPD_CONF" << EOF
 listen=YES
 listen_ipv6=NO
 anonymous_enable=YES
@@ -163,11 +173,13 @@ write_enable=YES
 local_umask=002
 chroot_local_user=YES
 allow_writeable_chroot=YES
-user_sub_token=$USER
-local_root=/srv/ftp/users/$USER
+user_sub_token=\$USER
+local_root=/srv/ftp/users/\$USER
 pasv_enable=YES
 pasv_min_port=40000
 pasv_max_port=40100
+pasv_address=${BRIDGE_IP}
+listen_address=${BRIDGE_IP}
 userlist_enable=YES
 userlist_file=/etc/vsftpd/user_list
 userlist_deny=YES
