@@ -1,4 +1,3 @@
-
 #!/bin/sh
 # ============================================================================
 # Script de Automatizacion de Servidor FTP - Alpine Linux
@@ -31,6 +30,11 @@ GRUPO_REPROBADOS="reprobados"
 GRUPO_RECURSADORES="recursadores"
 GRUPO_FTP="ftp-data"
 VSFTPD_CONF="/etc/vsftpd/vsftpd.conf"
+# ============================================================================
+# FIX 3: Interfaz del adaptador Bridged en VirtualBox
+# Cambiar este valor si el nombre de la interfaz es diferente en tu maquina
+# ============================================================================
+BRIDGE_IFACE="eth2"
 
 verificar_instalacion() {
     print_info "Verificando instalacion de vsftpd..."
@@ -152,10 +156,7 @@ EOF
 # falsos positivos/negativos. /proc/mounts es siempre confiable.
 # ============================================================================
 esta_montado() {
-    # Comprueba si DST ya tiene un bind mount activo usando /proc/mounts
-    # que es el archivo del kernel, independiente de la herramienta "mount"
     DST="$1"
-    # Normalizar la ruta (quitar slash final si existe)
     DST="${DST%/}"
     grep -q "^[^ ]* ${DST} " /proc/mounts 2>/dev/null
     return $?
@@ -165,32 +166,27 @@ montar_bind() {
     SRC="$1"
     DST="$2"
 
-    # Crear destino si no existe
     if [ ! -d "$DST" ]; then
         mkdir -p "$DST"
         chown root:root "$DST"
         chmod 755 "$DST"
     fi
 
-    # FIX 2: Verificar con /proc/mounts (confiable en Alpine/BusyBox)
     if esta_montado "$DST"; then
         print_info "  Bind mount ya existe: $DST"
         return 0
     fi
 
-    # Montar
     if ! mount --bind "$SRC" "$DST"; then
         print_error "  Error al montar bind: $SRC -> $DST"
         return 1
     fi
 
-    # Verificar que realmente quedo montado
     if ! esta_montado "$DST"; then
         print_error "  Mount ejecutado pero no aparece en /proc/mounts: $DST"
         return 1
     fi
 
-    # Persistir en fstab eliminando entrada vieja si existe
     sed -i "\|${DST}|d" /etc/fstab 2>/dev/null || true
     echo "${SRC}  ${DST}  none  bind  0  0" >> /etc/fstab
 
@@ -202,14 +198,11 @@ desmontar_bind() {
     DST="$1"
     DST="${DST%/}"
 
-    # Eliminar entrada de fstab primero
     sed -i "\|${DST}|d" /etc/fstab 2>/dev/null || true
 
-    # FIX 2: Verificar con /proc/mounts
     if esta_montado "$DST"; then
         umount "$DST" 2>/dev/null
         sleep 1
-        # Si sigue montado, forzar con lazy unmount
         if esta_montado "$DST"; then
             umount -l "$DST" 2>/dev/null
             sleep 1
@@ -217,7 +210,6 @@ desmontar_bind() {
         print_ok "  Bind mount desmontado: $DST"
     fi
 
-    # Eliminar el directorio vacio
     if [ -d "$DST" ] && ! esta_montado "$DST"; then
         rmdir "$DST" 2>/dev/null || rm -rf "$DST" 2>/dev/null || true
     fi
@@ -318,7 +310,6 @@ cambiar_grupo_usuario() {
         return
     fi
 
-    # Detectar grupo actual
     GRUPO_ACTUAL=""
     if id -nG "$USUARIO" | grep -qw "$GRUPO_REPROBADOS"; then
         GRUPO_ACTUAL="$GRUPO_REPROBADOS"
@@ -350,7 +341,6 @@ cambiar_grupo_usuario() {
 
     JAULA="$USERS_ROOT/$USUARIO"
 
-    # Si la jaula no existe, reconstruirla desde cero
     if [ ! -d "$JAULA" ]; then
         print_warn "Jaula no encontrada, reconstruyendo desde cero..."
         mkdir -p "$JAULA"
@@ -362,16 +352,13 @@ cambiar_grupo_usuario() {
         montar_bind "$GENERAL_DIR" "$JAULA/general"
     fi
 
-    # Detener vsftpd ANTES de tocar bind mounts
     print_warn "Deteniendo vsftpd para liberar bind mounts..."
     rc-service vsftpd stop > /dev/null 2>&1
     sleep 2
 
-    # Desmontar AMBOS grupos para limpiar cualquier estado inconsistente
     desmontar_bind "$JAULA/$GRUPO_REPROBADOS"
     desmontar_bind "$JAULA/$GRUPO_RECURSADORES"
 
-    # Cambiar grupo del sistema
     if [ -n "$GRUPO_ACTUAL" ]; then
         delgroup "$USUARIO" "$GRUPO_ACTUAL" 2>/dev/null || true
         print_ok "Removido de '$GRUPO_ACTUAL'."
@@ -379,34 +366,27 @@ cambiar_grupo_usuario() {
     adduser "$USUARIO" "$NUEVO_GRUPO" > /dev/null 2>&1
     print_ok "Agregado a '$NUEVO_GRUPO'."
 
-    # Re-aplicar permisos en la carpeta real del grupo destino
     chown root:"$NUEVO_GRUPO" "$FTP_ROOT/$NUEVO_GRUPO"
     chmod 1770 "$FTP_ROOT/$NUEVO_GRUPO"
     print_ok "Permisos verificados en '$FTP_ROOT/$NUEVO_GRUPO'."
 
-    # Crear bind mount del nuevo grupo con verificacion via /proc/mounts
     if montar_bind "$FTP_ROOT/$NUEVO_GRUPO" "$JAULA/$NUEVO_GRUPO"; then
         print_ok "Bind mount '$NUEVO_GRUPO' creado correctamente."
     else
         print_error "Error al crear bind mount. Verifica que corres el script como root."
     fi
 
-    # Garantizar permisos correctos de la jaula (vsftpd exige root:root 755)
     chown root:root "$JAULA"
     chmod 755 "$JAULA"
 
-    # FIX 1: Asegurarse de que seccomp_sandbox=NO sigue en el conf
-    # antes de arrancar vsftpd para evitar que se caiga silenciosamente
     if ! grep -q "seccomp_sandbox=NO" "$VSFTPD_CONF" 2>/dev/null; then
         echo "seccomp_sandbox=NO" >> "$VSFTPD_CONF"
         print_warn "seccomp_sandbox=NO re-agregado al config."
     fi
 
-    # Arrancar vsftpd de nuevo
     rc-service vsftpd start > /dev/null 2>&1
     sleep 1
 
-    # Verificar que arranco correctamente
     if rc-service vsftpd status > /dev/null 2>&1; then
         print_ok "Servicio vsftpd reiniciado correctamente."
     else
@@ -447,12 +427,22 @@ instalar_ftp() {
     configurar_firewall
     rc-update add vsftpd default 2>/dev/null
     rc-service vsftpd restart
-    IP=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    # ============================================================================
+    # FIX 3: Tomar IP del adaptador Bridged (BRIDGE_IFACE=eth2) en lugar de
+    # la primera IP disponible, que en VirtualBox suele ser el NAT (eth0).
+    # Si eth2 no tiene IP asignada aun, se usa fallback a la primera disponible.
+    # ============================================================================
+    IP=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    if [ -z "$IP" ]; then
+        print_warn "No se encontro IP en $BRIDGE_IFACE, usando primera IP disponible como fallback..."
+        IP=$(ip addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    fi
     printf "\n"
     printf "${C_ROSE}[OK]    ══════════════════════════════════════════════${C_RESET}\n"
     printf "${C_ROSE}[OK]      Servidor FTP listo${C_RESET}\n"
     printf "${C_ROSE}[OK]    ══════════════════════════════════════════════${C_RESET}\n"
     printf "${C_PINK}[INFO]    IP     : %s${C_RESET}\n" "$IP"
+    printf "${C_PINK}[INFO]    Iface  : %s (Bridge)${C_RESET}\n" "$BRIDGE_IFACE"
     printf "${C_PINK}[INFO]    Puerto : 21${C_RESET}\n"
     printf "${C_PINK}[INFO]    Anon   : ftp://%s  (solo lectura en /general)${C_RESET}\n" "$IP"
     printf "${C_ROSE}[OK]    ══════════════════════════════════════════════${C_RESET}\n"
@@ -584,6 +574,16 @@ ver_estado() {
         printf "${C_ROSE}Escuchando${C_RESET}\n"
     else
         printf "${C_HOTPINK}No escuchando${C_RESET}\n"
+    fi
+    # ============================================================================
+    # FIX 3 (status): Mostrar la IP del Bridge especificamente
+    # ============================================================================
+    IP_BRIDGE=$(ip addr show "$BRIDGE_IFACE" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    printf "  IP Bridge (%s): " "$BRIDGE_IFACE"
+    if [ -n "$IP_BRIDGE" ]; then
+        printf "${C_ROSE}%s${C_RESET}\n" "$IP_BRIDGE"
+    else
+        printf "${C_HOTPINK}Sin IP asignada${C_RESET}\n"
     fi
     printf "\n"
     print_info "Conexiones activas en puerto 21:"
