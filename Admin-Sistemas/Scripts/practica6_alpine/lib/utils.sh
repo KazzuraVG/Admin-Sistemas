@@ -11,6 +11,7 @@ C_WHITE='\033[1;37m'
 C_YELLOW='\033[1;33m'
 C_BLUE='\033[1;34m'
 C_BOLD='\033[1m'
+C_PINK='\033[38;5;213m'
 
 # =============================================================================
 # MENSAJES
@@ -18,6 +19,10 @@ C_BOLD='\033[1m'
 print_warning() { printf "${C_YELLOW}[WARN]  %s${C_RESET}\n" "$1"; }
 print_success() { printf "${C_BLUE}[OK]    %s${C_RESET}\n" "$1"; }
 print_info()    { printf "${C_WHITE}[INFO]  %s${C_RESET}\n" "$1"; }
+
+print_menu() {
+    printf "${C_PINK}%s${C_RESET}\n" "$1"
+}
 
 print_title() {
     printf "\n${C_BOLD}${C_BLUE}========================================${C_RESET}\n"
@@ -68,24 +73,20 @@ validar_input() {
 validar_puerto() {
     p="$1"
 
-    # numero valido
     if ! echo "$p" | grep -qE '^[0-9]+$'; then
         print_warning "Puerto invalido"
         return 1
     fi
 
-    # rango
     if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
         print_warning "Puerto fuera de rango (1-65535)"
         return 1
     fi
 
-    # advertencia puertos bajos
     if [ "$p" -lt 1024 ] && [ "$p" -ne 80 ] && [ "$p" -ne 443 ]; then
         printf "${C_YELLOW}[WARN]  Puerto bajo (<1024)${C_RESET}\n"
     fi
 
-    # puertos reservados
     case "$p" in
         20|21|22|2122|23|25|53|110|143|3306|5432|6379|27017|40000|40001|40002|40003|40004|40005)
             print_warning "Puerto reservado"
@@ -93,7 +94,6 @@ validar_puerto() {
             ;;
     esac
 
-    # verificar uso
     if netstat -tuln 2>/dev/null | grep -q ":$p " || \
        ss -tuln 2>/dev/null | grep -q ":$p "; then
         print_warning "Puerto en uso"
