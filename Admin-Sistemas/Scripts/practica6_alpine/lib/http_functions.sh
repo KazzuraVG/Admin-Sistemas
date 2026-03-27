@@ -237,3 +237,94 @@ verificar_HTTP() {
     echo ""
     ss -tuln | grep LISTEN
 }
+
+# =============================================================================
+# VERIFICAR SERVICIO (espera que el puerto esté escuchando)
+# =============================================================================
+
+verificar_servicio() {
+    servicio="$1"
+    puerto="$2"
+    max=6
+    i=0
+
+    print_info "Esperando que $servicio levante en :$puerto ..."
+
+    while [ "$i" -lt "$max" ]; do
+        if ss -tuln 2>/dev/null | grep -q ":$puerto "; then
+            print_success "$servicio escuchando en :$puerto"
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+
+    print_warning "$servicio no respondió en puerto $puerto tras $max intentos"
+    return 1
+}
+
+# =============================================================================
+# CONFIGURAR PUERTO TOMCAT
+# =============================================================================
+
+configurar_puerto_tomcat() {
+    xml="/opt/tomcat/conf/server.xml"
+
+    if [ ! -f "$xml" ]; then
+        print_warning "No se encontró server.xml en $xml"
+        return 1
+    fi
+
+    sed -i "s/port=\"8080\"/port=\"$1\"/" "$xml"
+    print_success "Puerto Tomcat → $1"
+}
+
+# =============================================================================
+# REVISAR RESPUESTA HTTP (curl)
+# =============================================================================
+
+revisar_HTTP() {
+    print_title "RESPUESTA HTTP"
+
+    if ! requiere_comando "curl"; then
+        print_info "Instalando curl..."
+        apk add --no-cache curl >/dev/null 2>&1
+    fi
+
+    IP=$(_obtener_ip)
+
+    # Detecta puertos en escucha y prueba solo los que responden HTTP
+    puertos=$(ss -tuln 2>/dev/null \
+        | awk '/LISTEN/ { n=split($5,a,":"); print a[n] }' \
+        | grep -E '^[0-9]+$' \
+        | sort -un)
+
+    if [ -z "$puertos" ]; then
+        print_warning "No se detectaron puertos en escucha"
+        return 1
+    fi
+
+    encontrado=0
+
+    for p in $puertos; do
+        # Omite puertos que claramente no son HTTP (ssh, etc.)
+        case "$p" in
+            22|2122) continue ;;
+        esac
+
+        result=$(curl -sk --max-time 3 -o /dev/null \
+            -w "%{http_code} | %{time_total}s | %{size_download}B" \
+            "http://$IP:$p" 2>/dev/null)
+
+        code=$(echo "$result" | cut -d'|' -f1 | tr -d ' ')
+
+        # Solo muestra si hay respuesta HTTP real (código numérico)
+        if echo "$code" | grep -qE '^[0-9]{3}$'; then
+            printf "${C_BLUE}[OK]    http://$IP:%-6s  → HTTP %s  (%s)${C_RESET}\n" \
+                "$p" "$code" "$result"
+            encontrado=$((encontrado + 1))
+        fi
+    done
+
+    [ "$encontrado" -eq 0 ] && print_warning "Ningún puerto respondió HTTP"
+}
